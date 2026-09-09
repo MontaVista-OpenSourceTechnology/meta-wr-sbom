@@ -1022,8 +1022,12 @@ def is_externalDocumentRefs_on(d):
     return d.getVar('SBOM_externalDocumentRefs', True) == "1"
 
 python image_packages_spdx() {
+    import gzip
+    import io
+    import json
     import os
     import re
+    import tarfile
     import oe_sbom.spdx
     import oe_sbom.sbom
     from oe.rootfs import image_list_installed_packages
@@ -1131,11 +1135,28 @@ python image_packages_spdx() {
 
     packages = image_list_installed_packages(d)
     recipes = {}
-    externaldocrefs = set()
+    externaldocrefs = {}
     user_defined_licenses = {}
     user_defined_licenses_extracted = {}
     pattern_docref_recipe = r'DocumentRef-recipe-.*\:'
     pattern_licref = r'LicenseRef-[a-zA-Z0-9.-]+'
+
+    def add_external_document_ref(external_id, namespace, algorithm, checksum):
+        external_id = clear_spdxid_improper_char(external_id)
+        if external_id in externaldocrefs:
+            if externaldocrefs[external_id] != namespace:
+                bb.fatal("SPDX external document ID %s maps to both %s and %s" %
+                         (external_id, externaldocrefs[external_id], namespace))
+            return external_id
+
+        external_ref = oe_sbom.spdx.SPDXExternalDocumentRef()
+        external_ref.externalDocumentId = external_id
+        external_ref.spdxDocument = namespace
+        external_ref.checksum.algorithm = algorithm
+        external_ref.checksum.checksumValue = checksum
+        doc.externalDocumentRefs.append(external_ref)
+        externaldocrefs[external_id] = namespace
+        return external_id
 
     def collect_dep_relationships(spdx_file_path, relationship_type):
         spdx_doc, spdx_doc_sha1 = oe_sbom.sbom.read_doc(spdx_file_path)
@@ -1151,14 +1172,56 @@ python image_packages_spdx() {
                     continue
 
                 elif relationship_type == "BUILD_DEPENDENCY_OF":
-                    r.relatedSpdxElement = clear_spdxid_improper_char("%s:%s" % (r.relatedSpdxElement.replace('SPDXRef-Recipe', 'DocumentRef-recipe'), r.relatedSpdxElement))
-                    related_doc_ref = r.spdxElementId.split(":")[0]
-                    r.spdxElementId = clear_spdxid_improper_char(r.spdxElementId.replace("dependency-", ""))
+                    # Recipe documents contain both local relationships (for
+                    # downloaded sources) and relationships to dependency
+                    # recipe documents. Once copied into the flattened image
+                    # document, both endpoints must be document-qualified.
+                    current_doc_ref = add_external_document_ref(
+                        "DocumentRef-%s" % spdx_doc.name,
+                        spdx_doc.documentNamespace,
+                        "SHA1",
+                        spdx_doc_sha1,
+                    )
+
+                    def qualify_recipe_element(element):
+                        if ":" not in element:
+                            return "%s:%s" % (current_doc_ref, element)
+
+                        source_ref_id, target_id = element.split(":", 1)
+                        for external_ref in spdx_doc.externalDocumentRefs:
+                            if external_ref.externalDocumentId != source_ref_id:
+                                continue
+
+                            mapped_ref_id = external_ref.externalDocumentId.replace(
+                                "DocumentRef-dependency-", "DocumentRef-", 1)
+                            mapped_ref_id = add_external_document_ref(
+                                mapped_ref_id,
+                                external_ref.spdxDocument,
+                                external_ref.checksum.algorithm,
+                                external_ref.checksum.checksumValue,
+                            )
+                            # Preserve the target document's SPDXID
+                            # verbatim. Changing it here would point at an
+                            # element that does not exist in that document.
+                            return "%s:%s" % (mapped_ref_id, target_id)
+
+                        bb.warn("Unable to resolve SPDX external document reference %s in %s" %
+                                (source_ref_id, spdx_file_path))
+                        return None
+
+                    spdx_element = qualify_recipe_element(r.spdxElementId)
+                    related_element = qualify_recipe_element(r.relatedSpdxElement)
+                    if spdx_element is None or related_element is None:
+                        continue
+
+                    r.spdxElementId = spdx_element
+                    r.relatedSpdxElement = related_element
                     for chk_dup in doc.relationships:
                         if chk_dup.spdxElementId == r.spdxElementId and chk_dup.relatedSpdxElement == r.relatedSpdxElement:
                             break
                     else:
                         doc.relationships.append(r)
+                    continue
                 elif relationship_type == "GENERATED_FROM":
                     if r.spdxElementId.startswith("SPDXRef-Package-"):
                         related_doc_ref = r.relatedSpdxElement.split(":")[0]
@@ -1168,10 +1231,12 @@ python image_packages_spdx() {
 
                 for ed in spdx_doc.externalDocumentRefs:
                     if ed.externalDocumentId == related_doc_ref:
-                        ed.externalDocumentId = clear_spdxid_improper_char(ed.externalDocumentId.replace("dependency-", ""))
-                        if ed.externalDocumentId not in externaldocrefs:
-                            doc.externalDocumentRefs.append(ed)
-                            externaldocrefs.add(ed.externalDocumentId)
+                        add_external_document_ref(
+                            ed.externalDocumentId.replace("DocumentRef-dependency-", "DocumentRef-", 1),
+                            ed.spdxDocument,
+                            ed.checksum.algorithm,
+                            ed.checksum.checksumValue,
+                        )
                         break
 
     kernel_recipe = d.getVar("PREFERRED_PROVIDER_virtual/kernel", True)
@@ -1198,9 +1263,6 @@ python image_packages_spdx() {
                 pkg_ref.spdxDocument = pkg_doc.documentNamespace
                 pkg_ref.checksum.algorithm = "SHA1"
                 pkg_ref.checksum.checksumValue = pkg_doc_sha1
-
-                if is_externalDocumentRefs_on(d):
-                    doc.externalDocumentRefs.append(pkg_ref)
 
                 doc.add_relationship("%s" % os_package.SPDXID, "CONTAINS", "%s" % clear_spdxid_improper_char(p.SPDXID))
                 collect_dep_relationships(pkg_spdx_path, "GENERATED_FROM")
@@ -1293,10 +1355,130 @@ python image_packages_spdx() {
                                     if package.SPDXID in recipes[name]:
                                         package.externalRefs.append(externalRef)
 
+    # Link the flattened image summary to every detailed package and runtime
+    # document. This makes the image document the root of the complete SBOM
+    # graph while preserving the legacy flattened package list.
+    detailed_ref_ids = set(ref.externalDocumentId for ref in doc.externalDocumentRefs)
+    for name in sorted(packages.keys()):
+        pkg_spdx_path = deploy_dir_spdx / "packages" / (name + ".spdx.json")
+        runtime_spdx_path = deploy_dir_spdx / "runtime" / ("runtime-" + name + ".spdx.json")
+
+        for path, ref_prefix, comment in (
+            (pkg_spdx_path, "DocumentRef-package-", "Detailed SPDX document for installed package %s" % name),
+            (runtime_spdx_path, "DocumentRef-", "Runtime dependency document for installed package %s" % name),
+        ):
+            if not path.exists():
+                bb.warn("Unable to reference missing SPDX document %s" % path)
+                continue
+
+            detailed_doc, detailed_sha1 = oe_sbom.sbom.read_doc(path)
+            detailed_ref_id = clear_spdxid_improper_char(ref_prefix + detailed_doc.name)
+            if detailed_ref_id not in detailed_ref_ids:
+                detailed_ref = oe_sbom.spdx.SPDXExternalDocumentRef()
+                detailed_ref.externalDocumentId = detailed_ref_id
+                detailed_ref.spdxDocument = detailed_doc.documentNamespace
+                detailed_ref.checksum.algorithm = "SHA1"
+                detailed_ref.checksum.checksumValue = detailed_sha1
+                doc.externalDocumentRefs.append(detailed_ref)
+                detailed_ref_ids.add(detailed_ref_id)
+
+            doc.add_relationship(
+                image,
+                "OTHER",
+                "%s:%s" % (detailed_ref_id, detailed_doc.SPDXID),
+                comment=comment,
+            )
+
     image_spdx_path = imgdeploydir / (image_name + ".spdx.json")
 
     with image_spdx_path.open("wb") as f:
         doc.to_json(f, sort_keys=True)
 
     make_image_link(imgdeploydir, image_link_name, image_spdx_path, ".spdx.json")
+
+    # Seed the detailed package and runtime documents explicitly, then follow
+    # their external document references to collect the complete SPDX document
+    # closure.
+    archive_paths = [image_spdx_path]
+
+    for name in sorted(packages.keys()):
+        pkg_spdx_path = deploy_dir_spdx / "packages" / (name + ".spdx.json")
+        runtime_spdx_path = deploy_dir_spdx / "runtime" / ("runtime-" + name + ".spdx.json")
+
+        for path in (pkg_spdx_path, runtime_spdx_path):
+            if path.exists():
+                archive_paths.append(path)
+            else:
+                bb.warn("Unable to add missing SPDX document %s" % path)
+
+    visited_docs = set()
+    index = {"documents": []}
+
+    spdx_tar_path = imgdeploydir / (image_name + ".spdx.tar.gz")
+    with gzip.open(str(spdx_tar_path), "w") as gzip_file:
+        with tarfile.open(fileobj=gzip_file, mode="w|") as tar:
+            def collect_spdx_document(path):
+                path_key = str(path)
+                if path_key in visited_docs:
+                    return
+
+                visited_docs.add(path_key)
+
+                with path.open("rb") as spdx_file:
+                    spdx_doc, sha1 = oe_sbom.sbom.read_doc(spdx_file)
+                    spdx_file.seek(0)
+
+                    if spdx_doc.documentNamespace in visited_docs:
+                        return
+
+                    visited_docs.add(spdx_doc.documentNamespace)
+                    bb.note("Adding SPDX document %s" % path)
+
+                    info = tar.gettarinfo(fileobj=spdx_file)
+                    info.name = spdx_doc.name + ".spdx.json"
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = "root"
+                    info.gname = "root"
+
+                    if source_date_epoch is not None and info.mtime > int(source_date_epoch):
+                        info.mtime = int(source_date_epoch)
+
+                    tar.addfile(info, spdx_file)
+
+                    index["documents"].append({
+                        "filename": info.name,
+                        "documentNamespace": spdx_doc.documentNamespace,
+                        "sha1": sha1,
+                    })
+
+                for ref in spdx_doc.externalDocumentRefs:
+                    # This oe_sbom version uses a flat by-namespace
+                    # directory.
+                    ref_path = deploy_dir_spdx / "by-namespace" / ref.spdxDocument.replace("/", "_")
+                    if not ref_path.exists():
+                        bb.fatal("Cannot find any SPDX file for document %s" % ref.spdxDocument)
+                    collect_spdx_document(ref_path)
+
+            for path in archive_paths:
+                collect_spdx_document(path)
+
+            index["documents"].sort(key=lambda entry: entry["filename"])
+            index_file = io.BytesIO(json.dumps(
+                index,
+                sort_keys=True,
+                indent=2,
+            ).encode("utf-8"))
+
+            info = tarfile.TarInfo()
+            info.name = "index.json"
+            info.size = len(index_file.getvalue())
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+
+            tar.addfile(info, fileobj=index_file)
+
+    make_image_link(imgdeploydir, image_link_name, spdx_tar_path, ".spdx.tar.gz")
 }
