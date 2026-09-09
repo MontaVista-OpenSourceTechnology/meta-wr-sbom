@@ -17,6 +17,8 @@ SPDXWORK = "${SPDXDIR}/work"
 
 SPDX_TOOL_NAME ??= "oe-spdx-creator"
 SPDX_TOOL_VERSION ??= "1.0"
+SPDX_ORG ??= "Wind River Systems, Inc."
+SPDX_SUPPLIER ??= "Organization: ${SPDX_ORG}"
 
 SPDXRUNTIMEDEPLOY = "${SPDXDIR}/runtime-deploy"
 
@@ -556,8 +558,8 @@ python do_create_spdx() {
     doc.creationInfo.created = creation_time
     doc.creationInfo.comment = "This document was created by analyzing recipe files during the build."
     doc.creationInfo.licenseListVersion = d.getVar("SPDX_LICENSE_DATA", True)["licenseListVersion"]
-    doc.creationInfo.creators.append("Tool: meta-wr-sbom")
-    doc.creationInfo.creators.append("Organization: Wind River Systems, Inc.")
+    doc.creationInfo.creators.append("Tool: %s - %s" % (d.getVar("SPDX_TOOL_NAME", True), d.getVar("SPDX_TOOL_VERSION", True)))
+    doc.creationInfo.creators.append("Organization: %s" % d.getVar("SPDX_ORG", True))
 
     recipe = oe_sbom.spdx.SPDXPackage()
     recipe.name = d.getVar("PN", True)
@@ -566,6 +568,7 @@ python do_create_spdx() {
     else:
         recipe.versionInfo = d.getVar("PV", True)
     recipe.SPDXID = oe_sbom.sbom.get_recipe_spdxid(d)
+    recipe.supplier = d.getVar("SPDX_SUPPLIER", True)
     recipe.comment = " PackageGroup: " + get_packagegroup()
     if bb.data.inherits_class("native", d) or bb.data.inherits_class("cross", d):
         recipe.annotations.append(create_annotation(d, "isNative"))
@@ -660,8 +663,8 @@ python do_create_spdx() {
             package_doc.creationInfo.created = creation_time
             package_doc.creationInfo.comment = "This document was created by analyzing packages created during the build."
             package_doc.creationInfo.licenseListVersion = d.getVar("SPDX_LICENSE_DATA", True)["licenseListVersion"]
-            package_doc.creationInfo.creators.append("Tool: meta-wr-sbom")
-            package_doc.creationInfo.creators.append("Organization: Wind River Systems, Inc.")
+            package_doc.creationInfo.creators.append("Tool: %s - %s" % (d.getVar("SPDX_TOOL_NAME", True), d.getVar("SPDX_TOOL_VERSION", True)))
+            package_doc.creationInfo.creators.append("Organization: %s" % d.getVar("SPDX_ORG", True))
             package_doc.externalDocumentRefs.append(recipe_ref)
 
             package_license = d.getVar("LICENSE:%s" % package, True) or d.getVar("LICENSE", True)
@@ -671,6 +674,7 @@ python do_create_spdx() {
             spdx_package.SPDXID = oe_sbom.sbom.get_package_spdxid(pkg_name)
             spdx_package.name = pkg_name
             spdx_package.versionInfo = d.getVar("PV", True)
+            spdx_package.supplier = d.getVar("SPDX_SUPPLIER", True)
             spdx_package.licenseDeclared = convert_license_to_spdx(package_license, package_doc, d, found_licenses)
 
             package_doc.packages.append(spdx_package)
@@ -813,8 +817,8 @@ python do_create_runtime_spdx() {
             runtime_doc.creationInfo.created = creation_time
             runtime_doc.creationInfo.comment = "This document was created by analyzing package runtime dependencies."
             runtime_doc.creationInfo.licenseListVersion = d.getVar("SPDX_LICENSE_DATA", True)["licenseListVersion"]
-            runtime_doc.creationInfo.creators.append("Tool: meta-wr-sbom")
-            runtime_doc.creationInfo.creators.append("Organization: Wind River Systems, Inc.")
+            runtime_doc.creationInfo.creators.append("Tool: %s - %s" % (d.getVar("SPDX_TOOL_NAME", True), d.getVar("SPDX_TOOL_VERSION", True)))
+            runtime_doc.creationInfo.creators.append("Organization: %s" % d.getVar("SPDX_ORG", True))
 
             package_ref = oe_sbom.spdx.SPDXExternalDocumentRef()
             package_ref.externalDocumentId = "DocumentRef-package-" + package
@@ -1067,24 +1071,21 @@ python image_packages_spdx() {
     doc.creationInfo.created = creation_time
     doc.creationInfo.comment = "This document was created by collecting packages built into image."
     doc.creationInfo.licenseListVersion = d.getVar("SPDX_LICENSE_DATA", True)["licenseListVersion"]
-    doc.creationInfo.creators.append("Tool: meta-wr-sbom")
-    doc.creationInfo.creators.append("Organization: Wind River Systems, Inc.")
+    doc.creationInfo.creators.append("Tool: %s - %s" % (d.getVar("SPDX_TOOL_NAME", True), d.getVar("SPDX_TOOL_VERSION", True)))
+    doc.creationInfo.creators.append("Organization: %s" % d.getVar("SPDX_ORG", True))
+    image_supplier = d.getVar("SPDX_SUPPLIER", True)
     if 'Yocto' in d.getVar("DISTRO_NAME", True):
         doc.comment = "DISTRO: " + "Yocto-" + get_yocto_codename(d.getVar("DISTRO_VERSION", True)) + "-" + d.getVar("DISTRO_VERSION", True)
-        image_supplier = "Organization: OpenEmbedded ()"
     elif 'Wind River' in d.getVar("DISTRO_NAME", True):
         doc.comment = "DISTRO: " + "WRLinux-" + d.getVar("DISTRO_VERSION", True)
-        image_supplier = "Organization: Wind River Systems, Inc."
     else:
         wr_version = d.getVar("WRLINUX_VERSION", True)
         if wr_version:
             doc.comment = "DISTRO: " + "WRLinux-" + wr_version
-            image_supplier = "Organization: Wind River Systems, Inc."
         else:
             bb_version = d.getVar("BB_VERSION", True)
             yocto_version = get_yocto_version(bb_version)
             doc.comment = "DISTRO: " + "Yocto-" + get_yocto_codename(yocto_version) + "-" + yocto_version
-            image_supplier = "Organization: OpenEmbedded ()"
 
         D_name = d.getVar("DISTRO_NAME", True).strip().replace(" ", "_")
         if D_name:
@@ -1230,7 +1231,7 @@ python image_packages_spdx() {
                     collect_lics(pattern_licref, component_package.licenseDeclared, user_defined_licenses)
 
                 component_package.copyrightText = p.copyrightText
-                component_package.supplier = "Organization: OpenEmbedded ()"
+                component_package.supplier = d.getVar("SPDX_SUPPLIER", True)
                 source_name = replace_name(pkgdata["PN"], recipe_substitutes)
                 component_package.sourceInfo = "built package from: " + source_name + " " + component_package.versionInfo
 
