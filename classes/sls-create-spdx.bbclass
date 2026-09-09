@@ -24,6 +24,7 @@ SPDXRUNTIMEDEPLOY = "${SPDXDIR}/runtime-deploy"
 
 SPDX_INCLUDE_SOURCES ??= "0"
 SPDX_INCLUDE_PACKAGED ??= "0"
+SPDX_INCLUDE_NATIVE ??= "0"
 SPDX_ARCHIVE_SOURCES ??= "0"
 SPDX_ARCHIVE_PACKAGED ??= "0"
 
@@ -719,6 +720,7 @@ do_create_spdx[dirs] = "${SPDXWORK}"
 do_create_spdx[cleandirs] = "${SPDXDEPLOY} ${SPDXWORK}"
 do_create_spdx[depends] += "${PATCHDEPENDENCY}"
 do_create_spdx[deptask] = "do_create_spdx"
+do_create_spdx[vardeps] += "SPDX_INCLUDE_NATIVE"
 do_create_spdx[lockfiles] = "${SPDXWORK}/create_spdx.lock"
 
 def spdx_disable_task(d, task):
@@ -726,8 +728,9 @@ def spdx_disable_task(d, task):
     is_native = bb.data.inherits_class('native', d) or pn.endswith('-native')
     is_blocked = pn in d.getVar('SPDX_BLACKLIST', True).split()
     current_mc = d.getVar('BB_CURRENT_MC', True)
+    include_native = d.getVar('SPDX_INCLUDE_NATIVE', True) == '1'
 
-    if (is_native and current_mc != '') or is_blocked:
+    if (is_native and current_mc != '' and not include_native) or is_blocked:
         d.setVarFlag(task, 'noexec', '1')
 
 python () {
@@ -904,6 +907,7 @@ addtask do_create_runtime_spdx_setscene
 do_create_runtime_spdx[dirs] = "${SPDXRUNTIMEDEPLOY}"
 do_create_runtime_spdx[cleandirs] = "${SPDXRUNTIMEDEPLOY}"
 do_create_runtime_spdx[rdeptask] = "do_create_spdx"
+do_create_runtime_spdx[vardeps] += "SPDX_INCLUDE_NATIVE"
 do_create_runtime_spdx[lockfiles] = "${SPDXRUNTIMEDEPLOY}/create_runtime_spdx.lock"
 
 python () {
