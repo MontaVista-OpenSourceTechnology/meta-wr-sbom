@@ -232,6 +232,7 @@ class SPDXPackage(SPDXObject):
     packageFileName = _String()
     annotations = _ObjectList(SPDXAnnotation)
     comment = _String()
+    checksums = _ObjectList(SPDXChecksum)
 
 
 class SPDXFile(SPDXObject):

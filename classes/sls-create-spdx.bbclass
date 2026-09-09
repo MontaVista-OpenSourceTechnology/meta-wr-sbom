@@ -341,7 +341,7 @@ def add_package_sources_from_debug(d, package_doc, spdx_package, package, packag
                 if not debugsrc_path.exists():
                     continue
 
-                file_sha256 = bb.utils.sha256_file(debugsrc_path)
+                file_sha256 = bb.utils.sha256_file(str(debugsrc_path))
 
                 if file_sha256 in sources:
                     source_file = sources[file_sha256]
@@ -428,6 +428,7 @@ def collect_dep_recipes(d, doc, spdx_recipe):
     return dep_recipes
 
 collect_dep_recipes[vardepsexclude] += "BB_TASKDEPDATA"
+collect_dep_recipes[vardeps] += "DEPENDS"
 
 
 def collect_dep_sources(d, dep_recipes):
@@ -454,6 +455,53 @@ def collect_dep_sources(d, dep_recipes):
         search_paths.append(get_spdxdir_from_annotation(d, dep.recipe))
 
     return sources, search_paths
+
+
+def add_download_packages(d, doc, recipe):
+    import bb.fetch2
+    import oe_sbom.sbom
+    import oe_sbom.spdx
+
+    download_idx = 0
+    for src_uri in (d.getVar("SRC_URI", True) or "").split():
+        fetch_data = bb.fetch2.FetchData(src_uri, d)
+
+        # Local recipe files are represented by the source files collected
+        # below, rather than as downloadable packages.
+        if fetch_data.type == "file":
+            continue
+
+        for name in fetch_data.names:
+            download_idx += 1
+            package = oe_sbom.spdx.SPDXPackage()
+            package.name = "%s-source-%d" % (d.getVar("PN", True), download_idx)
+            package.SPDXID = oe_sbom.sbom.get_download_spdxid(d, download_idx)
+
+            # Reconstruct the resolved fetch URL without URI parameters or
+            # credentials. Do not publish absolute paths to local SCM mirrors.
+            if fetch_data.host or not fetch_data.path.startswith("/"):
+                uri = fetch_data.type
+                proto = getattr(fetch_data, "proto", None)
+                if proto is not None:
+                    uri += "+" + proto
+                uri += "://" + fetch_data.host + fetch_data.path
+                if fetch_data.method.supports_srcrev():
+                    uri += "@" + fetch_data.revisions[name]
+                package.downloadLocation = uri
+
+            if fetch_data.method.supports_checksum(fetch_data):
+                for checksum_id in ("md5", "sha256"):
+                    expected_checksum = getattr(fetch_data, "%s_expected" % checksum_id, None)
+                    if expected_checksum is None:
+                        continue
+                    checksum = oe_sbom.spdx.SPDXChecksum()
+                    checksum.algorithm = checksum_id.upper()
+                    checksum.checksumValue = expected_checksum
+                    package.checksums.append(checksum)
+
+            doc.packages.append(package)
+            doc.add_relationship(doc, "DESCRIBES", package)
+            doc.add_relationship(package, "BUILD_DEPENDENCY_OF", recipe)
 
 
 python do_create_spdx() {
@@ -523,14 +571,6 @@ python do_create_spdx() {
         recipe.annotations.append(create_annotation(d, "isNative"))
     recipe.annotations.append(create_annotation(d, "SPDXDIR:%s" % d.getVar("PKGD", True).replace(str(top_dir) +'/', '')))
 
-
-    for s in d.getVar('SRC_URI', True).split():
-        if not s.startswith("file://"):
-            recipe.downloadLocation = s
-            break
-    else:
-        recipe.downloadLocation = "NOASSERTION"
-
     homepage = d.getVar("HOMEPAGE", True)
     if homepage:
         recipe.homepage = homepage
@@ -567,6 +607,7 @@ python do_create_spdx() {
 
     doc.packages.append(recipe)
     doc.add_relationship(doc, "DESCRIBES", recipe)
+    add_download_packages(d, doc, recipe)
 
     if process_sources(d) and include_sources:
         recipe_archive = deploy_dir_spdx / "recipes" / (doc.name + ".tar.xz")
