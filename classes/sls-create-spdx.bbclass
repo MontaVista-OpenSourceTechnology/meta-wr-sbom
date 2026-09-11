@@ -876,6 +876,14 @@ def spdx_get_src(d):
 
     workdir = d.getVar("WORKDIR", True)
 
+    def run_source_task(task):
+        # exec_func runs the task body without its pre/post functions.
+        # OpenJDK uses these hooks to unpack its component archives.
+        prefuncs = (d.getVarFlag(task, 'prefuncs', True) or '').split()
+        postfuncs = (d.getVarFlag(task, 'postfuncs', True) or '').split()
+        for func in prefuncs + [task] + postfuncs:
+            bb.build.exec_func(func, d)
+
     try:
         # The kernel class functions require it to be on work-shared, so we dont change WORKDIR
         if not is_work_shared_spdx(d):
@@ -889,7 +897,7 @@ def spdx_get_src(d):
             # do_patch required 'B' existed).
             bb.utils.mkdirhier(d.getVar('B', True))
 
-            bb.build.exec_func('do_unpack', d)
+            run_source_task('do_unpack')
         # Copy source of kernel to spdx_workdir
         if is_work_shared_spdx(d):
             d.setVar('WORKDIR', spdx_workdir)
@@ -910,13 +918,16 @@ def spdx_get_src(d):
 
         # Make sure gcc and kernel sources are patched only once
         if not (d.getVar('SRC_URI', True) == "" or is_work_shared_spdx(d)):
-            bb.build.exec_func('do_patch', d)
+            run_source_task('do_patch')
 
         # Some userland has no source.
         if not os.path.exists( spdx_workdir ):
             bb.utils.mkdirhier(spdx_workdir)
     finally:
         d.setVar("WORKDIR", workdir)
+
+# Include the task bodies and their pre/post functions in the signature.
+spdx_get_src[vardeps] += "do_unpack do_patch"
 
 do_rootfs[recrdeptask] += "do_create_spdx do_create_runtime_spdx"
 
